@@ -25,8 +25,8 @@ cc_library(
 
 cc_library(
     name = "pcap",
-    srcs = glob(["Pcap++/src/*.cpp"], allow_empty=False),
-    hdrs = glob(["Pcap++/header/*.h"]),
+    srcs = glob(["Pcap++/src/*.cpp"], exclude = ["Pcap++/src/XdpDevice.cpp"], allow_empty=False),
+    hdrs = glob(["Pcap++/header/*.h"], exclude = ["Pcap++/header/XdpDevice.h"]),
     strip_include_prefix = "Pcap++/header",
     visibility = ["//visibility:public"],
     deps = [

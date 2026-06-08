@@ -1,5 +1,10 @@
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "all_sources",
+    srcs = glob(["**"]),
+)
+
 licenses(["notice"])
 exports_files(["LICENSE"])
 
@@ -12,7 +17,7 @@ cc_binary(
 	    "@com_github_gflags_gflags//:gflags", 
 	    "@com_github_google_glog//:glog",
     ],
-    data = glob(["*.pcap"]),
+    data = glob(["*.pcap"], allow_empty = True),
 )
 
 
