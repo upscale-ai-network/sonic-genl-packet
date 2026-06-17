@@ -103,6 +103,12 @@ DEST="$$(pwd)/$(@D)"
 mkdir -p "$$DEST"
 EXECROOT=$$(pwd)
 
+# Inner Makefiles invoke `bazel build`; install bazelisk as /usr/local/bin/bazel
+if ! command -v bazel >/dev/null 2>&1; then
+    curl -Lo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+    chmod +x /usr/local/bin/bazel
+fi
+
 WSROOT=$$(mktemp -d)
 trap 'rm -rf "$$WSROOT"' EXIT
 
@@ -136,6 +142,7 @@ mv libgenl-packet_{ver}_amd64.deb libgenl-packet-dev_{ver}_amd64.deb "$$DEST/"
         genl_build = _GENL_PACKET_BUILD,
     ),
     tags = [
+        "no-local",
         "no-sandbox",
         "requires-network",
     ],
@@ -176,6 +183,12 @@ ldconfig
 DEST="$$(pwd)/$(@D)"
 mkdir -p "$$DEST"
 EXECROOT=$$(pwd)
+
+# Inner Makefiles invoke `bazel build`; install bazelisk if missing
+if ! command -v bazel >/dev/null 2>&1; then
+    curl -Lo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+    chmod +x /usr/local/bin/bazel
+fi
 
 WSROOT=$$(mktemp -d)
 trap 'rm -rf "$$WSROOT"' EXIT
@@ -223,6 +236,7 @@ mv genl-packet-tools_{ver}_amd64.deb "$$DEST/"
         tools_build = _TOOLS_GENL_BUILD,
     ),
     tags = [
+        "no-local",
         "no-sandbox",
         "requires-network",
     ],
