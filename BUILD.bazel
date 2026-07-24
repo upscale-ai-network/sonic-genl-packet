@@ -1,0 +1,316 @@
+# SPDX-FileCopyrightText: UpscaleAI
+# SPDX-License-Identifier: Apache-2.0
+#
+# sonic-genl-packet — Generic Netlink packet library and tools.
+#
+# Phase 1 genrule overlay wrapping dpkg-buildpackage.
+# Contains 2 user-space sub-packages (libgenl-packet, genl-packet-tools).
+# The kernel module (genl-packet-module) is omitted — it requires matching
+# kernel headers and is built separately by platform-specific rules.
+# Tier 1: depends on libnl3.
+#
+# NOTE: The upstream Makefiles invoke `bazel build` internally.
+# We provide the original WORKSPACE.bazel so the inner Bazel can
+# fetch external deps (glog, gflags, pcaplusplus) and compile
+# the C++ targets.  The genl-packet/ sub-directories are separate
+# Bazel packages (they have their own BUILD.bazel), so their sources
+# are pulled in via filegroup deps rather than glob.
+
+
+# NOTE: Keep this overlay in sync with src/sonic-genl-packet/BUILD.bazel when updating
+# wheel tests, tolerance flags, or validation rules.
+load("//tools/genrule:diff_deb.bzl", "diff_deb_test")
+
+GENL_PACKET_VERSION = "1.0-1"
+
+LIBGENL_DEB = "libgenl-packet_{}_amd64.deb".format(GENL_PACKET_VERSION)
+LIBGENL_DEV_DEB = "libgenl-packet-dev_{}_amd64.deb".format(GENL_PACKET_VERSION)
+TOOLS_DEB = "genl-packet-tools_{}_amd64.deb".format(GENL_PACKET_VERSION)
+
+LIBNL3_VERSION_SONIC = "3.7.0-0.2+b1sonic1"
+
+LIBNL3_DEP_DEBS = [
+    "//src/libnl3:libnl-3-200_{v}_amd64.deb".format(v = LIBNL3_VERSION_SONIC),
+    "//src/libnl3:libnl-3-dev_{v}_amd64.deb".format(v = LIBNL3_VERSION_SONIC),
+    "//src/libnl3:libnl-genl-3-200_{v}_amd64.deb".format(v = LIBNL3_VERSION_SONIC),
+    "//src/libnl3:libnl-genl-3-dev_{v}_amd64.deb".format(v = LIBNL3_VERSION_SONIC),
+]
+
+# Sub-package source filegroups (glob can't cross package boundaries)
+_LIBGENL_SRCS = "//src/sonic-genl-packet/libgenl-packet/genl-packet:all_sources"
+_TOOLS_SRCS = "//src/sonic-genl-packet/genl-packet-tools/genl-packet:all_sources"
+
+# The upstream cc_library BUILD.bazel content — recreated in the temp
+# workspace because glob() excludes BUILD files from filegroups.
+_GENL_PACKET_BUILD = """\
+package(default_visibility = ["//visibility:public"])
+licenses(["notice"])
+cc_library(
+    name = "genl_packet",
+    srcs = ["receive_genetlink.cc"],
+    copts = ["-I/usr/include/libnl3"],
+    linkopts = ["-lnl-3", "-lnl-genl-3"],
+    hdrs = ["receive_genetlink.h", "uapi/linux/genl-packet.h", "prepare_netlink.h"],
+    deps = ["@com_github_google_glog//:glog"],
+)
+"""
+
+_TOOLS_GENL_BUILD = """\
+package(default_visibility = ["//visibility:public"])
+licenses(["notice"])
+cc_binary(
+    name = "sniffer",
+    srcs = ["sniffer.cc"],
+    deps = [
+        "//libgenl-packet/genl-packet:genl_packet",
+        "@com_github_pcapplusplus//:pcap",
+        "@com_github_gflags_gflags//:gflags",
+        "@com_github_google_glog//:glog",
+    ],
+    data = glob(["*.pcap"], allow_empty = True),
+)
+cc_binary(
+    name = "generator",
+    srcs = ["generator.cc"],
+    deps = [
+        "//libgenl-packet/genl-packet:genl_packet",
+        "@com_github_pcapplusplus//:pcap",
+        "@com_github_gflags_gflags//:gflags",
+    ],
+    copts = ["-I", "/usr/include/libnl3/"],
+    linkopts = ["-lnl-3", "-lnl-genl-3"],
+)
+"""
+
+# --- libgenl-packet (shared library) ---
+
+genrule(
+    name = "build_libgenl_packet",
+    srcs = glob(["libgenl-packet/**"]) + [
+        _LIBGENL_SRCS,
+        "ppp.BUILD",
+        "@bazel_6_5_linux_amd64//file",
+        "@genl_gflags_src//file",
+        "@genl_glog_src//file",
+        "@genl_pcapplusplus_src//file",
+        "@rules_cc_0_0_2//file",
+    ] + LIBNL3_DEP_DEBS,
+    outs = [LIBGENL_DEB, LIBGENL_DEV_DEB],
+    cmd = """
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:$$PATH"
+export DEB_BUILD_OPTIONS="nocheck"
+
+SYSROOT=$$(mktemp -d)
+for deb in $(locations {nl0}) $(locations {nl1}) \
+           $(locations {nl2}) $(locations {nl3}); do
+    dpkg-deb -x "$$deb" "$$SYSROOT"
+    dpkg -i --force-all "$$deb" 2>/dev/null || true
+done
+
+
+export CFLAGS="-I$$SYSROOT/usr/include $${{CFLAGS:-}}"
+export CXXFLAGS="-I$$SYSROOT/usr/include $${{CXXFLAGS:-}}"
+export LDFLAGS="-L$$SYSROOT/usr/lib/x86_64-linux-gnu -L$$SYSROOT/lib/x86_64-linux-gnu -Wl,-rpath-link,$$SYSROOT/usr/lib/x86_64-linux-gnu -Wl,-rpath-link,$$SYSROOT/lib/x86_64-linux-gnu $${{LDFLAGS:-}}"
+export PKG_CONFIG_PATH="$$SYSROOT/usr/lib/x86_64-linux-gnu/pkgconfig:$$SYSROOT/usr/lib/pkgconfig:$${{PKG_CONFIG_PATH:-}}"
+export LD_LIBRARY_PATH="$$SYSROOT/usr/lib/x86_64-linux-gnu:$${{LD_LIBRARY_PATH:-}}"
+export LIBRARY_PATH="$$SYSROOT/usr/lib/x86_64-linux-gnu:$${{LIBRARY_PATH:-}}"
+export DEB_DH_SHLIBDEPS_ARGS="--dpkg-shlibdeps-params=--ignore-missing-info"
+# Install sysroot to system paths (autotools builds require system paths)
+cp -a "$$SYSROOT/usr/." /usr/ 2>/dev/null || true
+if [ -d "$$SYSROOT/lib" ] && [ ! -L "$$SYSROOT/lib" ]; then
+    cp -a "$$SYSROOT/lib/." /lib/ 2>/dev/null || true
+fi
+ldconfig 2>/dev/null || true
+
+export CMAKE_PREFIX_PATH="$$SYSROOT/usr"
+
+DEST="$$(pwd)/$(@D)"
+mkdir -p "$$DEST"
+EXECROOT=$$(pwd)
+
+WSROOT=$$(mktemp -d)
+trap 'rm -rf "$$WSROOT"' EXIT
+
+# Materialize the inner build's pinned external repositories locally. The
+# upstream Makefiles may still invoke Bazel, but that nested build is offline.
+mkdir -p "$$WSROOT/vendor"
+mkdir -p "$$WSROOT/bin"
+cp "$$EXECROOT/$(location @bazel_6_5_linux_amd64//file)" "$$WSROOT/bin/bazel"
+chmod +x "$$WSROOT/bin/bazel"
+export PATH="$$WSROOT/bin:$$PATH"
+tar -xzf "$$EXECROOT/$(location @genl_gflags_src//file)" -C "$$WSROOT/vendor"
+unzip -q "$$EXECROOT/$(location @genl_glog_src//file)" -d "$$WSROOT/vendor"
+tar -xzf "$$EXECROOT/$(location @genl_pcapplusplus_src//file)" -C "$$WSROOT/vendor"
+cp "$$EXECROOT/$(location ppp.BUILD)" "$$WSROOT/vendor/PcapPlusPlus-22.11/BUILD.bazel"
+mkdir -p "$$WSROOT/vendor/rules_cc"
+tar -xzf "$$EXECROOT/$(location @rules_cc_0_0_2//file)" -C "$$WSROOT/vendor/rules_cc"
+cat > "$$WSROOT/WORKSPACE.bazel" <<'WSEOF'
+workspace(name = "com_github_pins_genl_packet")
+local_repository(name = "com_github_gflags_gflags", path = "vendor/gflags-e171aa2d15ed9eb17054558e0b3a6a413bb01067")
+local_repository(name = "com_github_google_glog", path = "vendor/glog-0.5.0")
+local_repository(name = "com_github_pcapplusplus", path = "vendor/PcapPlusPlus-22.11")
+local_repository(name = "rules_cc", path = "vendor/rules_cc")
+WSEOF
+echo "6.5.0" > "$$WSROOT/.bazelversion"
+
+# Copy libgenl-packet/ tree (glob + filegroup files merge in the execroot)
+mkdir -p "$$WSROOT/libgenl-packet"
+cp -a "$$EXECROOT/$$(dirname $(location libgenl-packet/Makefile))/." "$$WSROOT/libgenl-packet/"
+
+# Recreate BUILD.bazel for genl-packet sub-package (glob excludes BUILD files)
+cat > "$$WSROOT/libgenl-packet/genl-packet/BUILD.bazel" << 'BUILDEOF'
+{genl_build}
+BUILDEOF
+
+find "$$WSROOT/libgenl-packet/debian" -maxdepth 1 -type f \
+    ! -name "rules" ! -name "pre*" ! -name "post*" \
+    -executable -exec chmod -x {{}} + 2>/dev/null || true
+
+cd "$$WSROOT/libgenl-packet"
+export SOURCE_DATE_EPOCH=0
+env -u LD_LIBRARY_PATH dpkg-buildpackage -rfakeroot -b -us -uc -j$$(nproc 2>/dev/null || echo 4) --admindir /var/lib/dpkg
+cd ..
+mv libgenl-packet_{ver}_amd64.deb libgenl-packet-dev_{ver}_amd64.deb "$$DEST/"
+""".format(
+        nl0 = LIBNL3_DEP_DEBS[0],
+        nl1 = LIBNL3_DEP_DEBS[1],
+        nl2 = LIBNL3_DEP_DEBS[2],
+        nl3 = LIBNL3_DEP_DEBS[3],
+        ver = GENL_PACKET_VERSION,
+        genl_build = _GENL_PACKET_BUILD,
+    ),
+    tags = [
+        "no-local",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# --- genl-packet-tools (sniffer + generator binaries) ---
+
+genrule(
+    name = "build_genl_packet_tools",
+    srcs = glob(["genl-packet-tools/**", "libgenl-packet/**"]) + [
+        _TOOLS_SRCS,
+        _LIBGENL_SRCS,
+        "ppp.BUILD",
+        "@bazel_6_5_linux_amd64//file",
+        "@genl_gflags_src//file",
+        "@genl_glog_src//file",
+        "@genl_pcapplusplus_src//file",
+        "@rules_cc_0_0_2//file",
+    ] + LIBNL3_DEP_DEBS + [
+        ":" + LIBGENL_DEB,
+        ":" + LIBGENL_DEV_DEB,
+    ],
+    outs = [TOOLS_DEB],
+    cmd = """
+set -euo pipefail
+export PATH="/usr/sbin:/sbin:$$PATH"
+export DEB_BUILD_OPTIONS="nocheck"
+
+SYSROOT=$$(mktemp -d)
+for deb in $(locations {nl0}) $(locations {nl1}) \
+           $(locations {nl2}) $(locations {nl3}) \
+           $(location :{libgenl}) $(location :{libgenl_dev}); do
+    dpkg-deb -x "$$deb" "$$SYSROOT"
+    dpkg -i --force-all "$$deb" 2>/dev/null || true
+done
+
+DEST="$$(pwd)/$(@D)"
+mkdir -p "$$DEST"
+EXECROOT=$$(pwd)
+
+WSROOT=$$(mktemp -d)
+trap 'rm -rf "$$WSROOT"' EXIT
+
+# Offline inner workspace backed only by declared, pinned source archives.
+mkdir -p "$$WSROOT/vendor"
+mkdir -p "$$WSROOT/bin"
+cp "$$EXECROOT/$(location @bazel_6_5_linux_amd64//file)" "$$WSROOT/bin/bazel"
+chmod +x "$$WSROOT/bin/bazel"
+export PATH="$$WSROOT/bin:$$PATH"
+tar -xzf "$$EXECROOT/$(location @genl_gflags_src//file)" -C "$$WSROOT/vendor"
+unzip -q "$$EXECROOT/$(location @genl_glog_src//file)" -d "$$WSROOT/vendor"
+tar -xzf "$$EXECROOT/$(location @genl_pcapplusplus_src//file)" -C "$$WSROOT/vendor"
+cp "$$EXECROOT/$(location ppp.BUILD)" "$$WSROOT/vendor/PcapPlusPlus-22.11/BUILD.bazel"
+mkdir -p "$$WSROOT/vendor/rules_cc"
+tar -xzf "$$EXECROOT/$(location @rules_cc_0_0_2//file)" -C "$$WSROOT/vendor/rules_cc"
+cat > "$$WSROOT/WORKSPACE.bazel" <<'WSEOF'
+workspace(name = "com_github_pins_genl_packet")
+local_repository(name = "com_github_gflags_gflags", path = "vendor/gflags-e171aa2d15ed9eb17054558e0b3a6a413bb01067")
+local_repository(name = "com_github_google_glog", path = "vendor/glog-0.5.0")
+local_repository(name = "com_github_pcapplusplus", path = "vendor/PcapPlusPlus-22.11")
+local_repository(name = "rules_cc", path = "vendor/rules_cc")
+WSEOF
+echo "6.5.0" > "$$WSROOT/.bazelversion"
+touch "$$WSROOT/BUILD.bazel"
+
+# Pin PcapPlusPlus to v22.11 (master drifts and breaks the ppp.BUILD)
+sed -i 's|refs/heads/master.zip|refs/tags/v22.11.zip|; s|PcapPlusPlus-master|PcapPlusPlus-22.11|' "$$WSROOT/WORKSPACE.bazel"
+
+# Copy both sub-trees (internal Bazel needs libgenl-packet sources too)
+mkdir -p "$$WSROOT/genl-packet-tools" "$$WSROOT/libgenl-packet"
+cp -a "$$EXECROOT/$$(dirname $(location genl-packet-tools/Makefile))/." "$$WSROOT/genl-packet-tools/"
+cp -a "$$EXECROOT/$$(dirname $(location libgenl-packet/Makefile))/."    "$$WSROOT/libgenl-packet/"
+
+# Recreate BUILD.bazel files for sub-packages (glob excludes BUILD files)
+cat > "$$WSROOT/libgenl-packet/genl-packet/BUILD.bazel" << 'BEOF1'
+{genl_build}
+BEOF1
+
+cat > "$$WSROOT/genl-packet-tools/genl-packet/BUILD.bazel" << 'BEOF2'
+{tools_build}
+BEOF2
+
+find "$$WSROOT/genl-packet-tools/debian" -maxdepth 1 -type f \
+    ! -name "rules" ! -name "pre*" ! -name "post*" \
+    -executable -exec chmod -x {{}} + 2>/dev/null || true
+
+cd "$$WSROOT/genl-packet-tools"
+export SOURCE_DATE_EPOCH=0
+env -u LD_LIBRARY_PATH dpkg-buildpackage -rfakeroot -b -us -uc -j$$(nproc 2>/dev/null || echo 4) --admindir /var/lib/dpkg
+cd ..
+mv genl-packet-tools_{ver}_amd64.deb "$$DEST/"
+""".format(
+        nl0 = LIBNL3_DEP_DEBS[0],
+        nl1 = LIBNL3_DEP_DEBS[1],
+        nl2 = LIBNL3_DEP_DEBS[2],
+        nl3 = LIBNL3_DEP_DEBS[3],
+        libgenl = LIBGENL_DEB,
+        libgenl_dev = LIBGENL_DEV_DEB,
+        ver = GENL_PACKET_VERSION,
+        genl_build = _GENL_PACKET_BUILD,
+        tools_build = _TOOLS_GENL_BUILD,
+    ),
+    tags = [
+        "no-local",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# --- Diff tests ---
+
+diff_deb_test(
+    name = "libgenl_packet_diff",
+    bazel_deb = ":" + LIBGENL_DEB,
+    make_deb = "@make_target//:" + LIBGENL_DEB,
+    allow_elf_drift = True,
+    tags = ["manual"],
+)
+
+diff_deb_test(
+    name = "genl_packet_tools_diff",
+    bazel_deb = ":" + TOOLS_DEB,
+    make_deb = "@make_target//:" + TOOLS_DEB,
+    allow_elf_drift = True,
+    tags = ["manual"],
+)
